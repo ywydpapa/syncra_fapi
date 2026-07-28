@@ -10,19 +10,32 @@
         body { padding: 20px; background-color: #f8f9fa; }
         .table-container { background: white; padding: 20px; border-radius: 10px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
 
-        /* ✅ 테이블 제목(th)과 데이터(td) 모두 완벽한 중앙 정렬 적용 */
-        .table th, .table td {
+                /* 메인 테이블(#aisTable)에만 파란 배경과 흰 글씨 적용 */
+        #aisTable th, #aisTable td {
             text-align: center !important;
             vertical-align: middle !important;
         }
-        .table th { background-color: #0d6efd; color: white; white-space: nowrap; }
+        #aisTable th { background-color: #0d6efd; color: white; white-space: nowrap; }
+        #vesselData th {
+            color: #212529 !important;
+            vertical-align: middle !important;
+            white-space: nowrap !important; /* 💡 추가: 글자 줄바꿈 방지 */
+            background-color: #f8f9fa !important; /* 밝은 회색 배경 유지 */
+        }
 
         .dataTables_filter { margin-bottom: 15px; }
 
-        /* 테이블 행에 마우스를 올리면 클릭 가능한 포인터(손가락) 모양으로 변경 */
         #aisTable tbody tr { cursor: pointer; }
 
-        /* 업데이트 시 깜빡임 효과 */
+        /* IMO 번호 링크 스타일 */
+        .imo-link {
+            color: #0d6efd;
+            font-weight: bold;
+            text-decoration: underline;
+            cursor: pointer;
+        }
+        .imo-link:hover { color: #0a58ca; }
+
         .highlight-row { animation: highlight 2s; }
         @keyframes highlight { 0% { background-color: #fff3cd; } 100% { background-color: transparent; } }
     </style>
@@ -57,7 +70,14 @@
                         <td><strong>{{ ship.mmsi }}</strong></td>
                         <td>{{ ship.vesselName }}</td>
                         <td>{{ ship.callSign }}</td>
-                        <td>{{ ship.imoNo if ship.imoNo else '-' }}</td>
+                        <td>
+                            <!-- IMO 번호가 있을 때만 클릭 가능한 링크로 표시 -->
+                            {% if ship.imoNo and ship.imoNo != 0 %}
+                                <span class="imo-link" data-imo="{{ ship.imoNo }}">{{ ship.imoNo }}</span>
+                            {% else %}
+                                -
+                            {% endif %}
+                        </td>
                         <td>{{ ship.vesselType }}</td>
                         <td>{{ ship.destination }}</td>
                         <td>{{ ship.eta if ship.eta else '-' }}</td>
@@ -80,6 +100,55 @@
         </div>
     </div>
 
+    <!-- 선박 제원 팝업 (Modal) -->
+    <div class="modal fade" id="vesselModal" tabindex="-1" aria-labelledby="vesselModalLabel" aria-hidden="true">
+        <div class="modal-dialog modal-dialog-centered">
+            <div class="modal-content">
+                <div class="modal-header bg-primary text-white">
+                    <h5 class="modal-title" id="vesselModalLabel">🚢 선박 상세 제원</h5>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body">
+                    <!-- 로딩 화면 -->
+                    <div id="vesselLoading" class="text-center py-4">
+                        <div class="spinner-border text-primary" role="status">
+                            <span class="visually-hidden">Loading...</span>
+                        </div>
+                        <p class="mt-2 text-muted">데이터베이스 및 API를 조회 중입니다...</p>
+                    </div>
+
+                    <!-- 데이터 표시 화면 -->
+                                        <div id="vesselData" style="display: none;">
+                        <table class="table table-bordered table-sm mb-0">
+                            <tbody>
+                                <tr><th class="bg-light">선박명</th><td id="modal-vesselName"></td></tr>
+                                <tr><th class="bg-light">AIS 선박명</th><td id="modal-nameAis"></td></tr>
+                                <tr><th class="bg-light">IMO / MMSI</th><td><span id="modal-imoNo"></span> / <span id="modal-vesselMmsi"></span></td></tr>
+                                <tr><th class="bg-light">호출부호</th><td id="modal-callSign"></td></tr>
+                                <tr><th class="bg-light">국적</th><td><span id="modal-vesselFlag"></span> (<span id="modal-countryCode"></span>)</td></tr>
+                                <tr><th class="bg-light">선종 / 상태</th><td><span id="modal-vesselType"></span> / <span id="modal-operatingStatus"></span></td></tr>
+                                <tr><th class="bg-light">건조년도</th><td id="modal-buildYear"></td></tr>
+                                <tr><th class="bg-light">조선소</th><td id="modal-builder"></td></tr>
+                                <tr><th class="bg-light">총톤수(GT)</th><td id="modal-grossTonnage"></td></tr>
+                                <tr><th class="bg-light">재화중량(DWT)</th><td id="modal-deadWeight"></td></tr>
+                                <tr><th class="bg-light">크기(L x B)</th><td id="modal-dimensions"></td></tr>
+                                <tr><th class="bg-light">최대/평균 흘수</th><td><span id="modal-draftMax"></span> / <span id="modal-draftAvg"></span></td></tr>
+                                <tr><th class="bg-light">최대/평균 속도</th><td><span id="modal-speedMax"></span> / <span id="modal-speedAvg"></span></td></tr>
+                                <tr><th class="bg-light">선급</th><td id="modal-classSociety"></td></tr>
+                                <tr><th class="bg-light">선주 / 관리사</th><td><span id="modal-ownerName"></span><br><span id="modal-managerName" class="text-muted"></span></td></tr>
+                                <tr><th class="bg-light">데이터 출처</th><td><span id="modal-source" class="badge bg-info"></span></td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                    <!-- 에러 화면 -->
+                    <div id="vesselError" class="alert alert-danger mb-0" style="display: none;">
+                        선박 정보를 불러오는데 실패했습니다.
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
     <script src="https://cdn.datatables.net/1.13.7/js/jquery.dataTables.min.js"></script>
@@ -89,13 +158,89 @@
         $(document).ready(function() {
             var table = $('#aisTable').DataTable({
                 language: { url: '//cdn.datatables.net/plug-ins/1.13.7/i18n/ko.json' },
-                order: [[10, 'desc']], // 시간순 정렬
+                order: [[10, 'desc']],
                 pageLength: 25,
                 lengthMenu: [10, 25, 50, 100],
                 scrollX: true
             });
 
-            $('#aisTable tbody').on('click', 'tr', function() {
+            // 1. IMO 번호 클릭 이벤트 (팝업 열기)
+                        // 1. IMO 번호 클릭 이벤트 (팝업 열기)
+            $('#aisTable tbody').on('click', '.imo-link', async function(e) {
+                e.stopPropagation(); // 행(tr) 클릭 이벤트로 전파되는 것을 막음
+
+                var imo = $(this).data('imo');
+
+                // 모달 객체 가져오기 (매번 new로 생성하지 않고 기존 DOM 요소에서 가져오거나 초기화)
+                var modalEl = document.getElementById('vesselModal');
+                var vesselModal = bootstrap.Modal.getInstance(modalEl) || new bootstrap.Modal(modalEl);
+
+                // 초기화: 데이터 숨기고 로딩 화면 표시
+                $('#vesselData').hide();
+                $('#vesselError').hide();
+                $('#vesselLoading').show();
+
+                // 로딩 화면 상태로 모달을 먼저 띄움
+                vesselModal.show();
+
+                try {
+                    // FastAPI 서버로 데이터 요청 (await로 완료될 때까지 대기)
+                    const response = await fetch('/api/vessels/' + imo);
+
+                    if (!response.ok) {
+                        throw new Error('Network response was not ok');
+                    }
+
+                    const data = await response.json();
+
+                    const v = data;
+                    $('#modal-vesselName').text(v.vesselName || '-');
+                    $('#modal-nameAis').text(v.nameAis || '-');
+                    $('#modal-imoNo').text(v.imoNo || '-');
+                    $('#modal-vesselMmsi').text(v.vesselMmsi || '-');
+                    $('#modal-callSign').text(v.callSign || '-');
+                    $('#modal-vesselFlag').text(v.vesselFlag || '-');
+                    $('#modal-countryCode').text(v.countryCode || '-');
+                    $('#modal-vesselType').text(v.vesselType || '-');
+                    $('#modal-operatingStatus').text(v.operatingStatus || '-');
+                    $('#modal-buildYear').text(v.buildYear ? v.buildYear + '년' : '-');
+                    $('#modal-builder').text(v.builder || '-');
+                    $('#modal-grossTonnage').text(v.grossTonnage ? v.grossTonnage.toLocaleString() + ' 톤' : '-');
+                    $('#modal-deadWeight').text(v.deadWeight ? v.deadWeight.toLocaleString() + ' 톤' : '-');
+                    const len = v.lengthOverall ? `${v.lengthOverall}${v.lengthUnit || 'm'}` : '-';
+                    const breadth = v.beam ? `${v.beam}${v.breadthUnit || 'm'}` : '-';
+                    $('#modal-dimensions').text(`${len} x ${breadth}`);
+                    $('#modal-draftMax').text(v.draft ? v.draft.toFixed(2) + 'm' : '-');
+                    $('#modal-draftAvg').text(v.draughtCalculatedAvg ? v.draughtCalculatedAvg.toFixed(2) + 'm' : '-');
+                    $('#modal-speedMax').text(v.speedObservedMax ? v.speedObservedMax.toFixed(2) + 'kn' : '-');
+                    $('#modal-speedAvg').text(v.speedCalculatedAvg ? v.speedCalculatedAvg.toFixed(2) + 'kn' : '-');
+                    $('#modal-classSociety').text(v.classSociety ? v.classSociety.toUpperCase() : '-');
+                    $('#modal-ownerName').text(v.ownerName || '-');
+                    $('#modal-managerName').text(v.managerName || '-');
+                    $('#modal-source').text(v.source || 'API');
+                    if(v.source && v.source.includes('API')) {
+                        $('#modal-source').removeClass('bg-info').addClass('bg-success');
+                    } else {
+                        $('#modal-source').removeClass('bg-success').addClass('bg-info');
+                    }
+                    $('#vesselLoading').hide();
+                    $('#vesselData').show();
+
+                } catch (error) {
+                    console.error('Error fetching vessel details:', error);
+                    $('#vesselLoading').hide();
+                    $('#vesselError').show();
+                }
+            });
+
+
+            // 2. 행(tr) 클릭 이벤트 (기존 VesselFinder 이동 기능 유지)
+            $('#aisTable tbody').on('click', 'tr', function(e) {
+                // 클릭한 요소가 imo-link 클래스를 가지고 있으면 무시 (위에서 처리함)
+                if ($(e.target).hasClass('imo-link')) {
+                    return;
+                }
+
                 var rowId = $(this).attr('id');
                 if (rowId) {
                     var mmsi = rowId.split('-')[1];
@@ -104,6 +249,7 @@
                 }
             });
 
+            // 3. 주기적 데이터 갱신
             setInterval(function() {
                 fetch('/api/ships')
                     .then(response => response.json())
@@ -111,7 +257,6 @@
                         data.forEach(ship => {
                             var targetId = 'row-' + ship.mmsi;
 
-                            // 뱃지 HTML 생성
                             var badgeHtml = '';
                             if (ship.attrib === 'XXXUPXXXUP') {
                                 badgeHtml = '<span class="badge bg-warning text-dark">Updated</span>';
@@ -121,11 +266,16 @@
                                 badgeHtml = '<span class="badge bg-secondary">' + ship.attrib + '</span>';
                             }
 
+                            // IMO 번호 HTML 구성 (갱신 시에도 링크 유지)
+                            var imoHtml = (ship.imoNo && ship.imoNo !== 0)
+                                ? '<span class="imo-link" data-imo="' + ship.imoNo + '">' + ship.imoNo + '</span>'
+                                : '-';
+
                             var rowData = [
                                 '<strong>' + ship.mmsi + '</strong>',
                                 ship.vesselName,
                                 ship.callSign,
-                                ship.imoNo || '-',
+                                imoHtml, // 수정된 IMO HTML 적용
                                 ship.vesselType,
                                 ship.destination,
                                 ship.eta || '-',
@@ -135,7 +285,6 @@
                                 ship.regDate
                             ];
 
-                            // 테이블에 해당 MMSI가 있는지 확인
                             var foundRow = null;
                             table.rows().every(function() {
                                 var rowNode = this.node();
@@ -145,7 +294,6 @@
                             });
 
                             if (foundRow) {
-                                // 기존 데이터와 뱃지(상태)가 다를 때만 갱신
                                 var currentData = foundRow.data();
                                 if (currentData[9] !== badgeHtml) {
                                     foundRow.data(rowData).draw(false);
@@ -154,7 +302,6 @@
                                     setTimeout(() => $(node).removeClass('highlight-row'), 2000);
                                 }
                             } else {
-                                // 화면에 없는 새로운 배면 추가
                                 var newRowNode = table.row.add(rowData).draw(false).node();
                                 $(newRowNode).attr('id', targetId);
                                 $(newRowNode).addClass('highlight-row');
