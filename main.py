@@ -1,10 +1,14 @@
 import os
 import httpx
+import asyncio
+import json  # 🌟 추가됨: AI 응답을 JSON으로 파싱하기 위해 필요
 from typing import Optional
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, ConfigDict
 from dotenv import load_dotenv
+import time
+from google import genai
 
 # SQLAlchemy 비동기 관련 모듈
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
@@ -14,12 +18,15 @@ from sqlalchemy.sql import func
 from sqlalchemy.future import select
 
 # ==========================================
-# 1. 환경 변수 로드
+# 1. 환경 변수 로드 및 AI 클라이언트 설정
 # ==========================================
 load_dotenv()
 DB_URL = os.getenv("dburl")
-VESSEL_API_KEY = os.getenv("VESSEL_API_KEY", "your_vesselapi_key_here")  # .env에 추가 필요
+VESSEL_API_KEY = os.getenv("VESSEL_API_KEY", "your_vesselapi_key_here")
 VESSEL_API_BASE_URL = "https://api.vesselapi.com/v1"
+
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+ai_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 
 # ==========================================
 # 2. 데이터베이스 설정 (비동기)
@@ -32,7 +39,6 @@ Base = declarative_base()
 # ==========================================
 # 3. 테이블 모델 정의
 # ==========================================
-# (기존) AIS 데이터 테이블
 class StvAIS(Base):
     __tablename__ = 'stvAIS'
 
@@ -52,7 +58,6 @@ class StvAIS(Base):
     attrib = Column(String(10))
 
 
-# (신규) 선박 제원 마스터 테이블
 class VesselMst(Base):
     __tablename__ = "vesselMst"
 
@@ -88,8 +93,6 @@ class VesselMst(Base):
 # ==========================================
 # 4. Pydantic 스키마 (API 응답용)
 # ==========================================
-# main.py
-
 class VesselResponse(BaseModel):
     vesselNo: Optional[int] = None
     imoNo: str
@@ -124,11 +127,6 @@ class VesselResponse(BaseModel):
 # ==========================================
 # 5. 외부 API 호출 함수 (VesselAPI 연동)
 # ==========================================
-# main.py 의 fetch_vessel_from_api 함수를 아래 코드로 교체하세요.
-
-# ==========================================
-# 3. API 매핑 함수 수정 (fetch_vessel_from_api 함수 교체)
-# ==========================================
 async def fetch_vessel_from_api(imo: str) -> dict:
     url = f"https://api.vesselapi.com/v1/vessel/{imo}"
     headers = {"Authorization": f"Bearer {VESSEL_API_KEY}", "Accept": "application/json"}
@@ -144,7 +142,6 @@ async def fetch_vessel_from_api(imo: str) -> dict:
         json_response = response.json()
         vessel_data = json_response.get("vessel", {})
 
-        # 💡 API의 모든 데이터를 DB 컬럼명에 맞게 매핑
         return {
             "imoNo": str(vessel_data.get("imo", imo)),
             "vesselMmsi": str(vessel_data.get("mmsi")) if vessel_data.get("mmsi") else None,
@@ -172,18 +169,107 @@ async def fetch_vessel_from_api(imo: str) -> dict:
             "managerName": vessel_data.get("manager_name")
         }
 
+# ==========================================
+# 6. 🌟 AI 부산항 판별 로직 (일괄 처리 - 10초 주기 제한)
+# ==========================================
+busan_dest_cache = {}
+api_semaphore = asyncio.Semaphore(1)
+api_cooldown_until = 0  # 다음 API 호출이 가능한 시간
+
+
+async def update_busan_cache_batch(destinations: set):
+    global api_cooldown_until
+    if not ai_client:
+        return
+
+    # 🌟 1. 10초 쿨다운 체크: 아직 10초가 안 지났으면 AI 호출 생략
+    if time.time() < api_cooldown_until:
+        return
+
+    unknown_dests = []
+    fast_match_keywords = ["BUSAN", "PUSAN", "KRBUS", "KRPUS", "KR BUS", "KR PUS"]
+    negative_keywords = [
+        "SHANGHAI", "SINGAPORE", "TOKYO", "OSAKA", "QINGDAO", "NINGBO",
+        "HONG KONG", "HKG", "YOKOHAMA", "NAGOYA", "KOBE", "VLADIVOSTOK",
+        "CN ", "JP ", "US ", "TW ", "VN "
+    ]
+
+    # 캐시나 키워드에 없는 "진짜 모르는 목적지"만 추려냄
+    for dest in destinations:
+        if not dest: continue
+        dest_upper = dest.strip().upper()
+
+        if dest_upper in busan_dest_cache:
+            continue
+
+        if any(k in dest_upper for k in fast_match_keywords):
+            busan_dest_cache[dest_upper] = True
+            continue
+
+        if any(k in dest_upper for k in negative_keywords):
+            busan_dest_cache[dest_upper] = False
+            continue
+
+        unknown_dests.append(dest_upper)
+
+    # 모르는 목적지가 없으면 API 호출 없이 종료
+    if not unknown_dests:
+        return
+
+    # 동시 다발적인 API 호출 방지
+    async with api_semaphore:
+        try:
+            # 🌟 2. 호출 즉시 다음 호출 가능 시간을 '현재 시간 + 10초'로 설정
+            # (프런트가 3초마다 요청해도 백엔드는 10초에 1번만 AI를 찌름)
+            api_cooldown_until = time.time() + 10
+
+            prompt = f"""다음은 선박 목적지 텍스트 목록입니다.
+각 텍스트가 대한민국 '부산(Busan/Pusan)'을 의미하는지 판별해주세요.
+반드시 아래와 같은 JSON 형식으로만 응답하세요. 마크다운 기호나 다른 설명은 절대 하지 마세요.
+{{
+  "목적지텍스트1": true,
+  "목적지텍스트2": false
+}}
+
+목적지 목록:
+{json.dumps(unknown_dests, ensure_ascii=False)}"""
+
+            # 🌟 3. 정상 작동하던 gemini-2.0-flash 로 복구 (404 에러 해결)
+            response = await ai_client.aio.models.generate_content(
+                model='gemini-2.0-flash',
+                contents=prompt
+            )
+
+            result_text = response.text.replace("```json", "").replace("```", "").strip()
+            parsed_result = json.loads(result_text)
+
+            for k, v in parsed_result.items():
+                busan_dest_cache[k.upper()] = bool(v)
+
+            for dest in unknown_dests:
+                if dest not in busan_dest_cache:
+                    busan_dest_cache[dest] = False
+
+        except Exception as e:
+            error_msg = str(e)
+            print(f"Batch AI Error: {error_msg}")
+
+            # 429 에러가 혹시라도 발생하면 60초 대기
+            if "429" in error_msg or "RESOURCE_EXHAUSTED" in error_msg:
+                print("⚠️ API 한도 초과! 60초 동안 대기합니다.")
+                api_cooldown_until = time.time() + 60
+
 
 # ==========================================
-# 6. FastAPI 앱 및 템플릿 설정
+# 7. FastAPI 앱 및 템플릿 설정
 # ==========================================
 app = FastAPI()
 templates = Jinja2Templates(directory="templates")
 
 
 # ==========================================
-# 7. 라우터 (Endpoints)
+# 8. 라우터 (Endpoints)
 # ==========================================
-# (기존) 메인 페이지
 @app.get("/")
 async def view_ais_data(request: Request):
     async with AsyncSessionLocal() as session:
@@ -198,7 +284,6 @@ async def view_ais_data(request: Request):
     )
 
 
-# (기존) 실시간 갱신용 API
 @app.get("/api/ships")
 async def get_ships_api():
     async with AsyncSessionLocal() as session:
@@ -206,8 +291,18 @@ async def get_ships_api():
         result = await session.execute(stmt)
         ships = result.scalars().all()
 
+        # 🌟 1. 100개 선박 데이터에서 중복을 제거한 목적지 목록 추출
+        unique_destinations = {ship.destination for ship in ships if ship.destination}
+
+        # 🌟 2. 모르는 목적지들만 모아서 한 번에 AI에게 질문 (Batch 처리)
+        await update_busan_cache_batch(unique_destinations)
+
+        # 3. 결과 매핑 및 반환
         ship_list = []
         for ship in ships:
+            dest_upper = ship.destination.strip().upper() if ship.destination else ""
+            is_busan = busan_dest_cache.get(dest_upper, False)
+
             ship_list.append({
                 "mmsi": ship.mmsi,
                 "vesselName": ship.vesselName,
@@ -222,39 +317,34 @@ async def get_ships_api():
                 "dmsB": ship.dmsB,
                 "dmsC": ship.dmsC,
                 "dmsD": ship.dmsD,
-                "attrib": ship.attrib
+                "attrib": ship.attrib,
+                "isBusan": is_busan  # 캐시된 결과값 주입
             })
         return ship_list
 
 
-# (신규) 선박 제원 조회 및 캐싱 API
 @app.get("/api/vessels/{imo}", response_model=VesselResponse)
 async def get_vessel_info(imo: str):
     if not imo.isdigit() or len(imo) != 7:
         raise HTTPException(status_code=400, detail="Invalid IMO number format")
 
     async with AsyncSessionLocal() as session:
-        # 1. MariaDB에서 검색
         stmt = select(VesselMst).where(VesselMst.imoNo == imo)
         result = await session.execute(stmt)
         db_vessel = result.scalars().first()
-
         if db_vessel:
-            response_data = VesselResponse.model_validate(db_vessel) if hasattr(VesselResponse, 'model_validate') else VesselResponse.from_orm(db_vessel)
-            response_data.source = "MariaDB Cache"
+            response_data = VesselResponse.model_validate(db_vessel) if hasattr(VesselResponse,
+                                                                                'model_validate') else VesselResponse.from_orm(
+                db_vessel)
+            response_data.source = "DB Cache"
             return response_data
-
-        # 2. DB에 없으면 외부 API 호출 (여기서 이미 DB 컬럼명에 맞게 매핑되어 반환됨)
         api_data = await fetch_vessel_from_api(imo)
-
-        # 3. MariaDB에 저장
-        # 💡 수정됨: api_data가 이미 완벽한 매핑 형태이므로 바로 **api_data로 넣습니다.
         new_vessel = VesselMst(**api_data)
         session.add(new_vessel)
         await session.commit()
         await session.refresh(new_vessel)
-
-        # 4. 결과 반환
-        response_data = VesselResponse.model_validate(new_vessel) if hasattr(VesselResponse, 'model_validate') else VesselResponse.from_orm(new_vessel)
+        response_data = VesselResponse.model_validate(new_vessel) if hasattr(VesselResponse,
+                                                                             'model_validate') else VesselResponse.from_orm(
+            new_vessel)
         response_data.source = "VesselAPI (Newly Cached)"
         return response_data
