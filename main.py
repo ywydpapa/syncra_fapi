@@ -258,4 +258,3 @@ async def get_vessel_info(imo: str):
         response_data = VesselResponse.model_validate(new_vessel) if hasattr(VesselResponse, 'model_validate') else VesselResponse.from_orm(new_vessel)
         response_data.source = "VesselAPI (Newly Cached)"
         return response_data
-
